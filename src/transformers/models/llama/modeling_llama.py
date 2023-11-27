@@ -340,6 +340,7 @@ class LlamaAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
+        output_attention_vectors: bool = False,
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -417,6 +418,7 @@ class LlamaAttention(nn.Module):
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
+        attention_vectors = attn_output if output_attention_vectors else None
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -425,14 +427,19 @@ class LlamaAttention(nn.Module):
         if self.config.pretraining_tp > 1:
             attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
             o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+            if self.config.attention_bias:
+                o_proj_bias_slices = self.o_proj.bias.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+                attn_output = sum(
+                    [F.linear(attn_output[i], o_proj_slices[i]) + o_proj_bias_slices[i] for i in range(self.config.pretraining_tp)])
+            else:
+                attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
         else:
             attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_value, attention_vectors
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -449,6 +456,7 @@ class LlamaFlashAttention2(LlamaAttention):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
+        output_attention_vectors: bool = False,
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -525,13 +533,15 @@ class LlamaFlashAttention2(LlamaAttention):
             query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
         )
 
+        attention_vectors = attn_output if output_attention_vectors else None
+
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_value, attention_vectors
 
     def _flash_attention_forward(
         self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
@@ -646,6 +656,7 @@ class LlamaDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        output_attention_vectors: Optional[bool] = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -660,6 +671,8 @@ class LlamaDecoderLayer(nn.Module):
             use_cache (`bool`, *optional*):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
+            output_attention_vectors (`bool`, *optional*):
+                Whether or not to return the attention output tensors of all attention layers.
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
         if "padding_mask" in kwargs:
@@ -672,15 +685,17 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value, attention_vectors = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
+            output_attention_vectors=output_attention_vectors,
             use_cache=use_cache,
             **kwargs,
         )
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -696,6 +711,9 @@ class LlamaDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+
+        if output_attention_vectors:
+            outputs += (attention_vectors,)
 
         return outputs
 
@@ -800,6 +818,8 @@ LLAMA_INPUTS_DOCSTRING = r"""
         output_hidden_states (`bool`, *optional*):
             Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
             more detail.
+        output_attention_vectors (`bool`, *optional*):
+                Whether or not to return the attention output tensors of all attention layers.
         return_dict (`bool`, *optional*):
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
@@ -846,6 +866,7 @@ class LlamaModel(LlamaPreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
+        output_attention_vectors: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -903,6 +924,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
+        all_attention_vecs = () if output_attention_vectors else None
         next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -929,9 +951,19 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    output_attention_vectors=output_attention_vectors
                 )
 
             hidden_states = layer_outputs[0]
+
+            if output_attention_vectors:
+                if use_cache and output_attentions:
+                    idx = 3
+                elif use_cache or output_attentions:
+                    idx = 2
+                else:
+                    idx = 1
+                all_attention_vecs += (layer_outputs[idx],)
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
@@ -947,12 +979,13 @@ class LlamaModel(LlamaPreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_attention_vecs] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            attention_vectors=all_attention_vecs
         )
 
 
@@ -998,6 +1031,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
+        output_attention_vectors: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -1031,6 +1065,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        output_attention_vectors = (
+            output_attention_vectors if output_attention_vectors is not None else self.config.output_attention_vectors
+        )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -1042,6 +1079,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_attention_vectors=output_attention_vectors,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -1078,6 +1116,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            attention_vectors=outputs.attention_vectors
         )
 
     def prepare_inputs_for_generation(
@@ -1171,6 +1210,7 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
+        output_attention_vectors: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
@@ -1191,6 +1231,7 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_attention_vectors=output_attention_vectors,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]

@@ -151,12 +151,18 @@ class BaseModelOutputWithPast(ModelOutput):
 
             Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
             heads.
+        attention_vectors (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attention_vectors=True` is passed or when `config.output_attention_vectors=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            embed_size_per_head)`.
+
+            Hidden state after attention but before the output linear transformation.
     """
 
     last_hidden_state: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
+    attention_vectors: Optional[Tuple[torch.FloatTensor]] = None
 
 
 @dataclass
@@ -610,12 +616,18 @@ class CausalLMOutputWithPast(ModelOutput):
 
             Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
             heads.
+        attention_vectors (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attention_vectors=True` is passed or when `config.output_attention_vectors=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            embed_size_per_head)`.
+
+            Hidden state after attention but before the output linear transformation.
     """
 
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attention_vectors: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
@@ -690,12 +702,18 @@ class SequenceClassifierOutputWithPast(ModelOutput):
 
             Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
             heads.
+        attention_vectors (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attention_vectors=True` is passed or when `config.output_attention_vectors=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            embed_size_per_head)`.
+
+            Hidden state after attention but before the output linear transformation.
     """
 
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attention_vectors: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
